@@ -52,7 +52,7 @@ def run_pipeline_on_dataset(dataset_name, trial_id=0, epochs=30):
         # 2. Stage 1 Hub & Homophily Chamber Discovery via hub.py
         k_ideal = derive_k_ideal(g)
         hubs, scores, norm_coreness = get_kcore_hubs(g, top_k=k_ideal)
-        chambers, isolates, stats = build_homophily_boundaries(g, feats, hubs, tau=0.60, m_hops=2)
+        chambers, isolates, stats = build_homophily_boundaries(g, feats, hubs)
         
         print(f"Graph: {num_nodes} Nodes, {num_edges} Edges | K_ideal Hubs: {k_ideal}")
         print(f"In-Chamber Pool: {stats['num_in_chamber_nodes']} nodes | Isolate Pool: {stats['num_isolate_nodes']} nodes")

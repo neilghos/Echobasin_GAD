@@ -65,11 +65,12 @@ class AnomalyScoringMLP(nn.Module):
         max_affinity, best_centroid_idx = affinity_matrix.max(dim=-1)  # [N]
         c_closest = centroids[best_centroid_idx]                      # [N, D]
         
-        # 3. Construct Feature Vector for Scoring Head: [h_v || c_closest || (h_v - c_closest) || alpha_v]
-        diff_vector = h - c_closest                                    # [N, D]
+        # 3. Construct Feature Vector for Scoring Head using normalized vectors to prevent Sigmoid saturation
+        c_norm_closest = cent_norm[best_centroid_idx]                  # [N, D]
+        diff_vector = h_norm - c_norm_closest                          # [N, D]
         alpha_tensor = max_affinity.unsqueeze(-1)                      # [N, 1]
         
-        scoring_input = torch.cat([h, c_closest, diff_vector, alpha_tensor], dim=-1) # [N, 3*D + 1]
+        scoring_input = torch.cat([h_norm, c_norm_closest, diff_vector, alpha_tensor], dim=-1) # [N, 3*D + 1]
         
         # 4. Predict Anomaly Probability P(v)
         raw_scores = self.head(scoring_input).squeeze(-1)              # [N]
