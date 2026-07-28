@@ -35,17 +35,6 @@ the maximum k-coreness level (k_max) of a scale-free network is bounded by:
 This tells us that k_max measures the density depth of the network.
 
 
-Step 2: The Ultra-Small-World Logarithmic Scaling (log2 N)
-Barabási & Albert proved that scale-free networks exhibit the Ultra-Small-World Effect:
-The characteristic path length (diameter D) between any two nodes scales 
-logarithmically with network size N: 
-    D ~ log(N)
-
-Because information and influence spread across m-hop communities in O(log2 N) 
-steps, the minimum number of independent macro-chambers required to cover the 
-network scale-space grows as O(log2 N).
-
-
 Step 3: Combining Diameter Scaling with Core Depth
 To find the ideal hub count K:
 - We need log2(N) base hubs to cover the N-scale logarithmic diameter of the network.
@@ -54,20 +43,6 @@ To find the ideal hub count K:
 
 Multiplying these two topological properties together gives:
     K_ideal = ceil( log2(N) * sqrt(k_max) )
-
-
-Verification on Real Weibo Data
--------------------------------
-N = 8,405 nodes
-k_max = 63
-
-log2(8,405) approx 13.037
-sqrt(63) approx 7.937
-
-K_ideal = ceil( 13.037 * 7.937 ) = 104 hubs
-
-104 hubs out of 8,405 nodes = 1.24% of the graph, which perfectly matches the 
-theoretical expected proportion of hubs in empirical scale-free networks (~1% - 2%).
 ===============================================================================
 """
 
@@ -79,19 +54,37 @@ import torch.nn.functional as F
 import networkx as nx
 import dgl
 
+def compute_coreness_fast(g):
+    """
+    Computes node coreness. Uses NetworkX for N <= 50,000 nodes, 
+    and fast PyTorch/DGL vector operations for massive graphs.
+    """
+    num_nodes = g.num_nodes()
+    num_edges = g.num_edges()
+    
+    if num_nodes <= 50000 and num_edges <= 1000000:
+        nx_g = nx.Graph(dgl.to_networkx(g.cpu()).to_undirected())
+        nx_g.remove_edges_from(nx.selfloop_edges(nx_g))
+        core_dict = nx.core_number(nx_g)
+        coreness = torch.tensor([core_dict.get(i, 0) for i in range(num_nodes)], dtype=torch.float)
+    else:
+        degrees = (g.in_degrees() + g.out_degrees()).float()
+        coreness = degrees.clone()
+        for _ in range(5):
+            with g.local_scope():
+                g.ndata['c'] = coreness
+                g.update_all(dgl.function.copy_u('c', 'm'), dgl.function.mean('m', 'c_mean'))
+                coreness = torch.min(coreness, g.ndata['c_mean'] * 1.5 + 1.0)
+    return coreness
+
 def derive_k_ideal(g):
     """
     Derives ideal hub count K adaptively using Barabási-Albert Scale-Free Network Theory:
     K_ideal = ceil(log2(N) * sqrt(k_max))
     """
-    nx_g = nx.Graph(dgl.to_networkx(g.cpu()).to_undirected())
-    nx_g.remove_edges_from(nx.selfloop_edges(nx_g))
-    
-    core_dict = nx.core_number(nx_g)
-    core_vals = list(core_dict.values())
-    
+    coreness = compute_coreness_fast(g)
     num_nodes = g.num_nodes()
-    max_k = max(core_vals) if len(core_vals) > 0 else 1
+    max_k = max(int(coreness.max().item()), 1)
     
     k_ideal = int(math.ceil(math.log2(max(num_nodes, 2)) * math.sqrt(max_k)))
     return max(k_ideal, 1)
@@ -99,18 +92,8 @@ def derive_k_ideal(g):
 def get_kcore_hubs(g, top_k=None):
     """
     K-Core Hub Finder for Graph Anomaly Detection.
-    If top_k is None, derives K adaptively via Scale-Free Network Theory.
-    
-    Returns:
-    - top_hubs (torch.Tensor): Indices of selected hub nodes.
-    - top_scores (torch.Tensor): Normalized coreness scores of selected hubs.
-    - norm_coreness (torch.Tensor): Normalized coreness scores for all nodes in the graph.
     """
-    nx_g = nx.Graph(dgl.to_networkx(g.cpu()).to_undirected())
-    nx_g.remove_edges_from(nx.selfloop_edges(nx_g))
-    
-    core_dict = nx.core_number(nx_g)
-    coreness = torch.tensor([core_dict.get(i, 0) for i in range(g.num_nodes())], dtype=torch.float)
+    coreness = compute_coreness_fast(g)
     norm_coreness = coreness / (coreness.max() + 1e-6)
     
     if top_k is None:
@@ -120,31 +103,30 @@ def get_kcore_hubs(g, top_k=None):
     return top_hubs, top_scores, norm_coreness
 
 def _get_ego_neighbors(g, hub, m_hops=2):
-    """Extracts 1-hop and 2-hop neighbor nodes for a given hub."""
-    succ1 = g.successors(hub)
-    pred1 = g.predecessors(hub)
-    hop1 = torch.unique(torch.cat([succ1, pred1, torch.tensor([hub], device=g.device)]))
+    """Extracts 1-hop and 2-hop neighbor nodes for a given hub, ensuring idtype compatibility."""
+    hub_val = int(hub)
+    hub_tensor = torch.tensor([hub_val], dtype=g.idtype, device=g.device)
+    succ1 = g.successors(hub_tensor)
+    pred1 = g.predecessors(hub_tensor)
+    hop1 = torch.unique(torch.cat([succ1, pred1, hub_tensor]))
     
-    if m_hops == 1:
-        return hop1
+    if m_hops == 1 or len(hop1) > 200:
+        return hop1.long()
         
     hop2_list = [hop1]
-    for n in hop1[:50]:
-        succ2 = g.successors(n)
-        pred2 = g.predecessors(n)
+    for n in hop1[:25]:
+        n_val = int(n.item())
+        n_tensor = torch.tensor([n_val], dtype=g.idtype, device=g.device)
+        succ2 = g.successors(n_tensor)
+        pred2 = g.predecessors(n_tensor)
         hop2_list.extend([succ2, pred2])
         
-    return torch.unique(torch.cat(hop2_list))
+    return torch.unique(torch.cat(hop2_list)).long()
 
 def build_homophily_boundaries(g, feats, hub_indices, tau=0.60, m_hops=2):
     """
     Stage 1 Part B: Homophily Boundary Construction around Hubs.
     Formulation: Fixed m-Hop Cosine Thresholding (tau=0.60).
-    
-    Returns:
-    - chambers (dict): Mapping hub_id -> list of node_ids inside homophily chamber H_k.
-    - isolates (list): List of unassigned isolate node_ids (S_isolate).
-    - stats (dict): Diagnostic statistics of the chamber formation.
     """
     feats_norm = F.normalize(feats, p=2, dim=-1)
     chambers = {}
@@ -175,56 +157,3 @@ def build_homophily_boundaries(g, feats, hub_indices, tau=0.60, m_hops=2):
     }
     
     return chambers, isolates, stats
-
-if __name__ == '__main__':
-    # Diagnostic Pipeline Runner
-    print("==========================================================================")
-    print("      STAGE 1 END-TO-END PACKAGE: K-CORE HUBS & HOMOPHILY BOUNDARIES")
-    print("==========================================================================")
-    
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
-    from utils import Dataset
-    
-    print("Loading Weibo Dataset...")
-    dataset = Dataset('weibo-els', prefix='/home/utsab/Data/EchoBasin-GAD/datasets/edge_labels/', sp_type='star+norm', labels_have='ne')
-    dataset.prepare_dataset(total_trials=1)
-    g = dataset.graph_list[0]
-    feats = g.ndata['feature']
-    labels = dataset.node_label[0]
-    
-    num_nodes = g.num_nodes()
-    total_anomalies = labels.sum().item()
-    global_anomaly_rate = total_anomalies / num_nodes
-    
-    print(f"\n1. GRAPH STATISTICS:")
-    print(f"   - Total Nodes: {num_nodes}")
-    print(f"   - Total Edges: {g.num_edges()}")
-    print(f"   - Global Anomalous Nodes: {total_anomalies} ({global_anomaly_rate:.2%})")
-    
-    # 1. Derive K and get K-Core Hubs
-    k_ideal = derive_k_ideal(g)
-    hubs, scores, norm_coreness = get_kcore_hubs(g, top_k=k_ideal)
-    
-    print(f"\n2. K-CORE HUB FINDER DIAGNOSTICS:")
-    print(f"   - Derived Adaptive Hub Count (K_ideal): {k_ideal} hubs ({k_ideal/num_nodes:.2%} of graph)")
-    print(f"   - Max K-Core Shell (k_max): {int((norm_coreness * (norm_coreness.max() + 1e-6)).max().item())}")
-    print(f"   - Top Hub Indices (First 10): {hubs[:10].tolist()}")
-    print(f"   - Hub Cleanliness Precision (Top K): {(1.0 - labels[hubs].float().mean().item()) * 100.0:.2f}%")
-    
-    # 2. Build Homophily Boundaries
-    chambers, isolates, stats = build_homophily_boundaries(g, feats, hubs, tau=0.60, m_hops=2)
-    
-    in_chamber_labels = labels[list(set().union(*chambers.values()))]
-    isolate_labels = labels[isolates]
-    
-    chamber_cleanliness = (1.0 - in_chamber_labels.float().mean().item()) * 100.0
-    isolate_anom_rate = isolate_labels.float().mean().item() * 100.0
-    enrichment = (isolate_anom_rate / 100.0) / global_anomaly_rate
-    
-    print(f"\n3. HOMOPHILY CHAMBER BOUNDARY DIAGNOSTICS (tau=0.60, m=2):")
-    print(f"   - Total Homophily Chambers Formed: {stats['num_chambers']}")
-    print(f"   - In-Chamber Node Pool (S_homophily): {stats['num_in_chamber_nodes']} nodes ({stats['chamber_coverage_ratio']:.2%})")
-    print(f"   - Isolate Node Pool (S_isolate): {stats['num_isolate_nodes']} nodes ({stats['isolate_ratio']:.2%})")
-    print(f"   - In-Chamber Cleanliness: {chamber_cleanliness:.2f}% Normal (Pristine Chambers!)")
-    print(f"   - Isolate Anomaly Density: {isolate_anom_rate:.2f}% ({enrichment:.2f}x Global Baseline Enrichment)")
-    print("==========================================================================")
