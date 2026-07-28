@@ -6,42 +6,15 @@ ECHO-BASIN GRAPH ANOMALY DETECTION (GAD) - HUB FINDER & HOMOPHILY BOUNDARY PIPEL
 1. What is Barabási–Albert (BA) Scale-Free Network Theory?
 ----------------------------------------------------------
 In 1999, Albert-László Barabási and Réka Albert discovered that real-world networks 
-(social networks, financial transaction graphs, the internet) do not have a 
-random distribution of connections.
-
-Instead, they grow via Preferential Attachment ("the rich get richer"):
-When new users/nodes join a network, they preferentially connect to nodes 
-that are already well-connected.
-
-This creates a Power-Law Degree Distribution: 
-    P(k) ~ k^(-gamma)   (typically gamma approx 2.5 - 3.0)
-
-The Key Insight: In scale-free graphs, a tiny fraction of nodes naturally 
-become structural hubs, while the vast majority of nodes are peripheral.
-
+grow via Preferential Attachment ("the rich get richer"), producing a power-law 
+degree distribution P(k) ~ k^(-gamma).
 
 2. Step-by-Step Derivation of K_ideal = ceil( log2(N) * sqrt(k_max) )
 ----------------------------------------------------------------------
-
-Step 1: Maximum Degree & Core Shell Bounds
-In a scale-free graph of N nodes with power-law exponent gamma = 3:
-The maximum node degree k_max_deg scales with network size as: 
-    k_max_deg ~ N^(1 / (gamma - 1)) = N^(1/2) = sqrt(N)
-
-Dorogovtsev et al. ("K-core architecture of complex networks", 2006) proved that 
-the maximum k-coreness level (k_max) of a scale-free network is bounded by: 
-    k_max ~ sqrt(k_max_deg) ~ N^(1/4)
-
-This tells us that k_max measures the density depth of the network.
-
-
-Step 3: Combining Diameter Scaling with Core Depth
-To find the ideal hub count K:
-- We need log2(N) base hubs to cover the N-scale logarithmic diameter of the network.
-- We scale this base by the Core Depth Factor sqrt(k_max) to account for 
-  multi-tier community density (k_max).
-
-Multiplying these two topological properties together gives:
+- Max degree k_max_deg ~ sqrt(N)
+- Max k-core depth k_max ~ N^(1/4)
+- Ultra-Small-World Logarithmic Path Length D ~ log2(N)
+Combining topological diameter with core depth gives:
     K_ideal = ceil( log2(N) * sqrt(k_max) )
 ===============================================================================
 """
@@ -56,8 +29,8 @@ import dgl
 
 def compute_coreness_fast(g):
     """
-    Computes node coreness. Uses NetworkX for N <= 50,000 nodes, 
-    and fast PyTorch/DGL vector operations for massive graphs.
+    Computes node coreness using NetworkX for small/medium graphs, 
+    and fast PyTorch/DGL vector operations for large graphs.
     """
     num_nodes = g.num_nodes()
     num_edges = g.num_edges()
@@ -79,7 +52,7 @@ def compute_coreness_fast(g):
 
 def derive_k_ideal(g):
     """
-    Derives ideal hub count K adaptively using Barabási-Albert Scale-Free Network Theory:
+    Derives ideal hub count K adaptively using Scale-Free Network Theory:
     K_ideal = ceil(log2(N) * sqrt(k_max))
     """
     coreness = compute_coreness_fast(g)
@@ -90,9 +63,7 @@ def derive_k_ideal(g):
     return max(k_ideal, 1)
 
 def get_kcore_hubs(g, top_k=None):
-    """
-    K-Core Hub Finder for Graph Anomaly Detection.
-    """
+    """K-Core Hub Finder for Graph Anomaly Detection."""
     coreness = compute_coreness_fast(g)
     norm_coreness = coreness / (coreness.max() + 1e-6)
     
@@ -103,7 +74,7 @@ def get_kcore_hubs(g, top_k=None):
     return top_hubs, top_scores, norm_coreness
 
 def _get_ego_neighbors(g, hub, m_hops=2):
-    """Extracts 1-hop and 2-hop neighbor nodes for a given hub, ensuring idtype compatibility."""
+    """Extracts m-hop ego neighbors for a hub with idtype safety."""
     hub_val = int(hub)
     hub_tensor = torch.tensor([hub_val], dtype=g.idtype, device=g.device)
     succ1 = g.successors(hub_tensor)
@@ -123,11 +94,24 @@ def _get_ego_neighbors(g, hub, m_hops=2):
         
     return torch.unique(torch.cat(hop2_list)).long()
 
-def build_homophily_boundaries(g, feats, hub_indices, tau=0.60, m_hops=2):
+def build_homophily_boundaries(g, feats, hub_indices, tau=None, m_hops=None):
     """
     Stage 1 Part B: Homophily Boundary Construction around Hubs.
-    Formulation: Fixed m-Hop Cosine Thresholding (tau=0.60).
+    Uses density-adaptive hop radius and cosine thresholding to prevent chamber over-expansion.
     """
+    num_nodes = g.num_nodes()
+    num_edges = g.num_edges()
+    avg_degree = (2.0 * num_edges) / max(num_nodes, 1)
+    
+    # Adaptive Density Scaling
+    if m_hops is None or tau is None:
+        if num_edges >= 1000000 or avg_degree > 30:
+            m_hops = 1
+            tau = 0.70
+        else:
+            m_hops = 2
+            tau = 0.60
+            
     feats_norm = F.normalize(feats, p=2, dim=-1)
     chambers = {}
     all_chamber_nodes = set()
@@ -144,7 +128,6 @@ def build_homophily_boundaries(g, feats, hub_indices, tau=0.60, m_hops=2):
         chambers[hub] = chamber_nodes
         all_chamber_nodes.update(chamber_nodes)
         
-    num_nodes = g.num_nodes()
     isolates = list(set(range(num_nodes)) - all_chamber_nodes)
     
     stats = {
@@ -153,7 +136,9 @@ def build_homophily_boundaries(g, feats, hub_indices, tau=0.60, m_hops=2):
         'num_in_chamber_nodes': len(all_chamber_nodes),
         'num_isolate_nodes': len(isolates),
         'chamber_coverage_ratio': len(all_chamber_nodes) / num_nodes,
-        'isolate_ratio': len(isolates) / num_nodes
+        'isolate_ratio': len(isolates) / num_nodes,
+        'm_hops_used': m_hops,
+        'tau_used': tau
     }
     
     return chambers, isolates, stats
