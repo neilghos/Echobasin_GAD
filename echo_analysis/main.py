@@ -85,9 +85,7 @@ def run_pipeline_on_dataset(dataset_name, trial_id=0, epochs=30):
                 feats.to(device),
                 edge_index,
                 chambers,
-                isolates,
-                tau_evict=0.50,
-                theta_reassign=0.60
+                isolates
             )
             
         test_probs_np = test_probs[test_mask].cpu().numpy()
