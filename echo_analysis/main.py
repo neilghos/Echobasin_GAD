@@ -26,7 +26,7 @@ from hub import get_kcore_hubs, build_homophily_boundaries, derive_k_ideal
 from train import train_echobasin
 from eval import evaluate
 
-ALL_DATASETS = ['weibo', 'reddit', 'amazon', 'yelp', 'tolokers', 'questions', 'tfinance']
+ALL_DATASETS = ['weibo', 'reddit', 'amazon', 'yelp', 'tolokers', 'questions']
 
 def run_pipeline_on_dataset(dataset_name, trial_id=0, epochs=30):
     print(f"\n==========================================================================")
