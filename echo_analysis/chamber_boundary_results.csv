@@ -1,0 +1,5 @@
+Chamber Boundary Heuristic,In-Chamber Nodes,Isolate Pool Nodes,In-Chamber Cleanliness (%),Isolate Anomaly Rate (%),Isolate Anomaly Enrichment
+Fixed m-Hop Cosine (tau=0.60),3397,5008,96.76%,15.14%,1.47x Global
+Fixed m-Hop Cosine (tau=0.75),3148,5257,96.57%,14.46%,1.40x Global
+PPR Random Walk Diffusion (tau=0.005),1,8404,100.00%,10.33%,1.00x Global
+Adaptive Chamber Variance (alpha=0.5),493,7912,98.99%,10.91%,1.06x Global
