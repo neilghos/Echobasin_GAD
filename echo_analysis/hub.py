@@ -116,15 +116,28 @@ def build_homophily_boundaries(g, feats, hub_indices, tau=None, m_hops=None):
     chambers = {}
     all_chamber_nodes = set()
     
+    # Detect global feature homogeneity (e.g. Reddit: 99.4% cosine sim across all nodes).
+    # When all features are near-identical, tau cosine filtering passes every node into every
+    # chamber → centroids collapse → scoring_input identical for class 0 and class 1 → loss lock.
+    # Fix: bypass tau filter and use pure structural (k-core ego) chamber membership instead.
+    sample_idx = torch.randperm(feats_norm.shape[0])[:min(500, feats_norm.shape[0])]
+    sample_feats = feats_norm[sample_idx]  # [S, D]
+    mean_sim = (sample_feats @ sample_feats.T).mean().item()
+    use_structural_only = mean_sim >= 0.85
+    
     for hub in hub_indices.tolist():
         candidate_nodes = _get_ego_neighbors(g, hub, m_hops=m_hops)
-        hub_feat = feats_norm[hub]
-        cand_feats = feats_norm[candidate_nodes]
         
-        sims = (cand_feats * hub_feat).sum(dim=-1)
-        valid_mask = sims >= tau
+        if use_structural_only:
+            # Pure structural ego membership — no feature cosine filtering
+            chamber_nodes = candidate_nodes.tolist()
+        else:
+            hub_feat = feats_norm[hub]
+            cand_feats = feats_norm[candidate_nodes]
+            sims = (cand_feats * hub_feat).sum(dim=-1)
+            valid_mask = sims >= tau
+            chamber_nodes = candidate_nodes[valid_mask].tolist()
         
-        chamber_nodes = candidate_nodes[valid_mask].tolist()
         chambers[hub] = chamber_nodes
         all_chamber_nodes.update(chamber_nodes)
         

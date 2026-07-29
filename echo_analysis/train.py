@@ -60,7 +60,8 @@ def compute_homophily_alignment_loss(h, chambers, pred_probs):
 
 def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isolates, in_dim, epochs=100, lr=0.01, weight_decay=1e-4):
     """
-    Trains EchoBasin model and returns (trained_model, best_val_threshold, val_metrics).
+    Trains EchoBasin model and returns (trained_model, best_val_threshold, val_metrics, x_augmented).
+    x_augmented is the feature tensor actually used for training (may have structural features appended).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -77,6 +78,21 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
         
     x = feats.to(device)
     labels = node_labels.to(device)
+    
+    # Detect feature homogeneity (e.g. Reddit: raw features 99.4% cosine-similar).
+    # On such graphs the GNN produces near-identical h for every node → scoring_input
+    # is constant across classes → loss locks. Fix: inject structural node features
+    # (normalized degree + normalized log-degree) to break embedding collapse.
+    sample_idx = torch.randperm(x.shape[0])[:min(500, x.shape[0])]
+    sample_f = F.normalize(x[sample_idx].float(), p=2, dim=-1)
+    mean_sim = (sample_f @ sample_f.T).mean().item()
+    if mean_sim >= 0.85:
+        degree = torch.zeros(x.shape[0], device=device)
+        degree.index_add_(0, edge_index[1], torch.ones(edge_index.shape[1], device=device))
+        norm_deg     = (degree / (degree.max() + 1e-6)).unsqueeze(-1)               # [N, 1]
+        norm_log_deg = (torch.log(degree + 1) / (torch.log(degree.max() + 1) + 1e-6)).unsqueeze(-1)  # [N, 1]
+        x = torch.cat([x, norm_deg, norm_log_deg], dim=-1)
+        in_dim = in_dim + 2
     
     # Class imbalance weight
     train_labels = labels[train_mask]
@@ -129,4 +145,4 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
                 
         pbar.set_postfix({'Loss': f"{total_loss.item():.4f}", 'Val F1': f"{val_f1:.4f}"})
                 
-    return model, best_val_threshold, best_val_metrics
+    return model, best_val_threshold, best_val_metrics, x

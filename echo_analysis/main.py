@@ -59,7 +59,7 @@ def run_pipeline_on_dataset(dataset_name, trial_id=0, epochs=30):
         
         # 3. Train EchoBasin Model & Tune Validation Threshold via train.py
         print("\nTraining EchoBasin GNN Model...")
-        trained_model, best_val_thresh, val_metrics = train_echobasin(
+        trained_model, best_val_thresh, val_metrics, x_train = train_echobasin(
             g=g,
             feats=feats,
             node_labels=labels,
@@ -82,7 +82,7 @@ def run_pipeline_on_dataset(dataset_name, trial_id=0, epochs=30):
         trained_model.eval()
         with torch.no_grad():
             test_probs, _ = trained_model(
-                feats.to(device),
+                x_train,
                 edge_index,
                 chambers,
                 isolates
