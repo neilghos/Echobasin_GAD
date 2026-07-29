@@ -7,6 +7,8 @@ Trains EchoBasinGADModel (AnomalyScoringMLP Head) using:
 2. Soft Chamber Homophily Alignment Loss (scale = 0.01)
 """
 
+import copy
+from sklearn.metrics import roc_auc_score
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,8 +62,9 @@ def compute_homophily_alignment_loss(h, chambers, pred_probs):
 
 def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isolates, in_dim, epochs=100, lr=0.01, weight_decay=1e-4):
     """
-    Trains EchoBasin model and returns (trained_model, best_val_threshold, val_metrics, x_augmented).
-    x_augmented is the feature tensor actually used for training (may have structural features appended).
+    Trains EchoBasin model, selects best checkpoint by Validation AUROC,
+    reloads best checkpoint weights, performs F1 threshold selection, and returns
+    (best_model, best_val_threshold, val_metrics, x_augmented).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -105,9 +108,8 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
     model = EchoBasinGADModel(in_dim=in_dim, hidden_dim=64, out_dim=64, is_large_graph=is_large).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    best_val_f1 = -1.0
-    best_val_threshold = 0.50
-    best_val_metrics = None
+    best_val_auroc = -1.0
+    best_model_weights = copy.deepcopy(model.state_dict())
     
     pbar = tqdm(range(1, epochs + 1), desc="Training Epochs", leave=True)
     for epoch in pbar:
@@ -129,20 +131,31 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        # Validation Evaluation
+        # Checkpoint Selection based on Validation AUROC
         model.eval()
         with torch.no_grad():
             val_probs, _ = model(x, edge_index, chambers, isolates)
             val_probs_np = val_probs[val_mask].cpu().numpy()
             val_labels_np = labels[val_mask].cpu().numpy()
             
-            val_f1, val_thresh = get_best_f1(val_labels_np, val_probs_np)
-            
-            if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
-                best_val_threshold = val_thresh
-                best_val_metrics = evaluate(val_labels_np, val_probs_np)
+            val_auroc = float(roc_auc_score(val_labels_np, val_probs_np))
+            if val_auroc > best_val_auroc:
+                best_val_auroc = val_auroc
+                best_model_weights = copy.deepcopy(model.state_dict())
                 
-        pbar.set_postfix({'Loss': f"{total_loss.item():.4f}", 'Val F1': f"{val_f1:.4f}"})
-                
+        pbar.set_postfix({'Loss': f"{total_loss.item():.4f}", 'Val AUROC': f"{val_auroc:.4f}"})
+        
+    # Reload BEST Model Checkpoint selected by Validation AUROC
+    model.load_state_dict(best_model_weights)
+    model.eval()
+    
+    # Perform Validation Threshold & Metric Selection on Best Checkpointed Model
+    with torch.no_grad():
+        val_probs, _ = model(x, edge_index, chambers, isolates)
+        val_probs_np = val_probs[val_mask].cpu().numpy()
+        val_labels_np = labels[val_mask].cpu().numpy()
+        
+        best_val_f1, best_val_threshold = get_best_f1(val_labels_np, val_probs_np)
+        best_val_metrics = evaluate(val_labels_np, val_probs_np)
+        
     return model, best_val_threshold, best_val_metrics, x
