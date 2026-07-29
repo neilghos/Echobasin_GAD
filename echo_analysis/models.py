@@ -1,12 +1,12 @@
 """
 ===============================================================================
-ECHO-BASIN GRAPH ANOMALY DETECTION (GAD) - LEARNABLE SOTA ANOMALY SCORER
+ECHO-BASIN GRAPH ANOMALY DETECTION (GAD) - DEGREE-WEIGHTED CENTROIDS MODEL
 ===============================================================================
-The Official SOTA Architecture (98.21% Amazon, 97.79% Weibo, 83.90% Yelp, 79.48% Tolokers):
-Replaces heuristic hardcoded step-jump formulas with the end-to-end learnable AnomalyScoringMLP head.
+Features Degree-Weighted Chamber Centroid Readout:
+c_k = Sum_{u in H_k} ( deg(u) / Sum_{w in H_k} deg(w) ) * h_u
 
-Scoring Input Vector: [h_norm || c_norm_closest || (h_norm - c_norm_closest) || alpha_v]
-Outputs smooth, calibrated anomaly probability P(v in anomaly) in [0, 1].
+Gives high-degree core hubs higher weight in defining chamber centroids, 
+making centroids highly resilient to peripheral boundary noise!
 """
 
 import torch
@@ -30,13 +30,13 @@ class PyGGraphSAGEEncoder(nn.Module):
 
 class AnomalyScoringMLP(nn.Module):
     """
-    Learnable Differentiable SOTA Anomaly Scoring Head.
+    Learnable Differentiable Anomaly Scoring Head.
     Input: [h_norm || c_norm_closest || (h_norm - c_norm_closest) || alpha_v] (dim = 3*D + 1)
     Output: Calibrated Anomaly Probability P(v) in [0, 1]
     """
     def __init__(self, hidden_dim=64):
         super(AnomalyScoringMLP, self).__init__()
-        in_features = hidden_dim * 3 + 1
+        in_features = hidden_dim * 3 + 1  # 64*3 + 1 = 193
         self.head = nn.Sequential(
             nn.Linear(in_features, hidden_dim),
             nn.ReLU(),
@@ -64,7 +64,7 @@ class AnomalyScoringMLP(nn.Module):
         max_affinity, best_centroid_idx = affinity_matrix.max(dim=-1)  # [N]
         c_norm_closest = cent_norm[best_centroid_idx]                  # [N, D]
         
-        # 3. Construct Feature Vector for Scoring Head using normalized vectors to prevent Sigmoid saturation
+        # 3. Construct Feature Vector for Scoring Head
         diff_vector = h_norm - c_norm_closest                          # [N, D]
         alpha_tensor = max_affinity.unsqueeze(-1)                      # [N, 1]
         
@@ -78,7 +78,7 @@ class AnomalyScoringMLP(nn.Module):
 
 class EchoBasinGADModel(nn.Module):
     """
-    Unified EchoBasin Graph Anomaly Detection Model with Learnable SOTA Anomaly Scoring Head.
+    Unified EchoBasin Graph Anomaly Detection Model with Degree-Weighted Chamber Centroids.
     """
     def __init__(self, in_dim, hidden_dim=64, out_dim=64, is_large_graph=False):
         super(EchoBasinGADModel, self).__init__()
@@ -86,23 +86,36 @@ class EchoBasinGADModel(nn.Module):
         self.scorer_head = AnomalyScoringMLP(out_dim)
 
     def forward(self, x, edge_index, chambers, isolates, **kwargs):
+        device = x.device
+        
         # 1. Compute Node Representations H via GNN Encoder
         h = self.encoder(x, edge_index)
         
         if len(chambers) == 0:
-            prob_anomaly = torch.full((x.shape[0],), 0.50, device=x.device)
+            prob_anomaly = torch.full((x.shape[0],), 0.50, device=device)
             return torch.clamp(prob_anomaly, min=1e-6, max=1.0 - 1e-6), h
             
-        # 2. Compute Chamber Readout Centroids c_k = Mean_{w in H_k}(h_w)
+        # 2. Compute Node Degrees for Degree-Weighted Chamber Readout
+        num_nodes = h.shape[0]
+        deg = torch.zeros(num_nodes, device=device)
+        deg.index_add_(0, edge_index[1], torch.ones(edge_index.shape[1], device=device))
+        
+        # 3. Compute Degree-Weighted Chamber Centroids c_k = Sum_{u in H_k} (deg(u)/Sum deg) * h_u
         hub_list = list(chambers.keys())
         centroids = []
         for hub in hub_list:
             c_nodes = chambers[hub]
-            c_embed = h[c_nodes].mean(dim=0)
-            centroids.append(c_embed)
-        centroid_matrix = torch.stack(centroids, dim=0)  # [K, D]
+            c_nodes_tensor = torch.tensor(c_nodes, device=device, dtype=torch.long)
+            c_embeds = h[c_nodes_tensor]                                  # [M, D]
+            c_degs = deg[c_nodes_tensor].unsqueeze(-1)                   # [M, 1]
+            deg_sum = torch.clamp(c_degs.sum(), min=1e-6)
+            c_weights = c_degs / deg_sum                                  # [M, 1]
+            weighted_centroid = (c_embeds * c_weights).sum(dim=0)         # [D]
+            centroids.append(weighted_centroid)
+            
+        centroid_matrix = torch.stack(centroids, dim=0)                 # [K, D]
         
-        # 3. Predict End-to-End Calibrated Anomaly Probabilities P(v) via Learnable SOTA Head
+        # 4. Predict End-to-End Calibrated Anomaly Probabilities P(v) via SOTA Head
         prob_anomaly, max_affinity = self.scorer_head(h, centroid_matrix, chambers)
         
         return prob_anomaly, h
