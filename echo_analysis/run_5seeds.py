@@ -29,13 +29,20 @@ ALL_DATASETS = ['weibo', 'reddit', 'amazon', 'yelp', 'tolokers', 'questions']
 SEEDS = [42, 100, 2024, 777, 999]
 
 def set_seed(seed):
-    """Sets deterministic random seeds across Python, NumPy, PyTorch, and CUDA."""
+    os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ":4096:8"
+        try:
+            torch.use_deterministic_algorithms(mode=True, warn_only=True)
+        except Exception:
+            pass
 
 def run_dataset_5seeds(dataset_name, epochs=100):
     print(f"\n==========================================================================")

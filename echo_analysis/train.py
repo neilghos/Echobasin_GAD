@@ -60,7 +60,7 @@ def compute_homophily_alignment_loss(h, chambers, pred_probs):
     loss = F.mse_loss(pred_probs, target_score)
     return loss
 
-def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isolates, in_dim, epochs=100, lr=0.01, weight_decay=1e-4):
+def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isolates, in_dim, epochs=100, lr=0.01, weight_decay=1e-4, gamma=2.0, pos_weight_cap=5.0):
     """
     Trains EchoBasin model, selects best checkpoint by Validation AUROC,
     reloads best checkpoint weights, performs F1 threshold selection, and returns
@@ -73,7 +73,7 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
     num_edges = len(src)
     
     if num_edges > 10000000:
-        perm = torch.randperm(num_edges)[:3000000]
+        perm = torch.linspace(0, num_edges - 1, 3000000, device=g.device).long()
         src_samp, dst_samp = src[perm], dst[perm]
         edge_index = torch.stack([src_samp, dst_samp], dim=0).to(device)
     else:
@@ -86,7 +86,8 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
     # On such graphs the GNN produces near-identical h for every node → scoring_input
     # is constant across classes → loss locks. Fix: inject structural node features
     # (normalized degree + normalized log-degree) to break embedding collapse.
-    sample_idx = torch.randperm(x.shape[0])[:min(500, x.shape[0])]
+    # Fixed deterministic sampling of 500 nodes for feature homogeneity check
+    sample_idx = torch.linspace(0, x.shape[0] - 1, min(500, x.shape[0]), device=x.device).long()
     sample_f = F.normalize(x[sample_idx].float(), p=2, dim=-1)
     mean_sim = (sample_f @ sample_f.T).mean().item()
     if mean_sim >= 0.85:
@@ -97,11 +98,12 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
         x = torch.cat([x, norm_deg, norm_log_deg], dim=-1)
         in_dim = in_dim + 2
     
-    # Class imbalance weight
+    # Class imbalance weight with dynamic pos_weight_cap
     train_labels = labels[train_mask]
     num_pos = max(train_labels.sum().item(), 1)
     num_neg = max(len(train_labels) - num_pos, 1)
-    pos_weight = float(num_neg / num_pos)
+    raw_pos_weight = float(num_neg / num_pos)
+    pos_weight = min(raw_pos_weight, float(pos_weight_cap)) if pos_weight_cap is not None else raw_pos_weight
     
     # Instantiate Model & Optimizer
     is_large = (num_edges >= 10000000)
@@ -120,7 +122,7 @@ def train_echobasin(g, feats, node_labels, train_mask, val_mask, chambers, isola
         pred_probs, h = model(x, edge_index, chambers, isolates)
         
         # 1. Stabilized Weighted Focal Loss on Training Mask
-        loss_focal = compute_focal_loss(pred_probs[train_mask], train_labels, pos_weight=pos_weight, gamma=2.0)
+        loss_focal = compute_focal_loss(pred_probs[train_mask], train_labels, pos_weight=pos_weight, gamma=gamma)
         
         # 2. Soft Chamber Homophily Alignment Loss (scaled to 0.01)
         loss_homo = compute_homophily_alignment_loss(h, chambers, pred_probs)

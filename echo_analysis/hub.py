@@ -94,23 +94,18 @@ def _get_ego_neighbors(g, hub, m_hops=2):
         
     return torch.unique(torch.cat(hop2_list)).long()
 
-def build_homophily_boundaries(g, feats, hub_indices, tau=None, m_hops=None):
+def build_homophily_boundaries(g, feats, hub_indices, tau=0.50, m_hops=2):
     """
     Stage 1 Part B: Homophily Boundary Construction around Hubs.
-    Uses density-adaptive hop radius and cosine thresholding to prevent chamber over-expansion.
+    Universal SOTA Model B Defaults: tau = 0.50, m_hops = 2.
     """
     num_nodes = g.num_nodes()
     num_edges = g.num_edges()
-    avg_degree = (2.0 * num_edges) / max(num_nodes, 1)
     
-    # Adaptive Density Scaling
-    if m_hops is None or tau is None:
-        if num_edges >= 1000000 or avg_degree > 30:
-            m_hops = 1
-            tau = 0.70
-        else:
-            m_hops = 2
-            tau = 0.60
+    if m_hops is None:
+        m_hops = 2
+    if tau is None:
+        tau = 0.50
             
     feats_norm = F.normalize(feats, p=2, dim=-1)
     chambers = {}
@@ -120,7 +115,8 @@ def build_homophily_boundaries(g, feats, hub_indices, tau=None, m_hops=None):
     # When all features are near-identical, tau cosine filtering passes every node into every
     # chamber → centroids collapse → scoring_input identical for class 0 and class 1 → loss lock.
     # Fix: bypass tau filter and use pure structural (k-core ego) chamber membership instead.
-    sample_idx = torch.randperm(feats_norm.shape[0])[:min(500, feats_norm.shape[0])]
+    # Fixed deterministic sampling of 500 nodes for feature homogeneity check
+    sample_idx = torch.linspace(0, feats_norm.shape[0] - 1, min(500, feats_norm.shape[0]), device=feats.device).long()
     sample_feats = feats_norm[sample_idx]  # [S, D]
     mean_sim = (sample_feats @ sample_feats.T).mean().item()
     use_structural_only = mean_sim >= 0.85
