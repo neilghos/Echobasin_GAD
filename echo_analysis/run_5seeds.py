@@ -25,7 +25,7 @@ from hub import get_kcore_hubs, build_homophily_boundaries, derive_k_ideal
 from train import train_echobasin
 from eval import evaluate
 
-ALL_DATASETS = ['weibo', 'reddit', 'amazon', 'yelp', 'tolokers', 'questions']
+ALL_DATASETS = ['weibo', 'reddit', 'yelp', 'tolokers', 'questions']
 SEEDS = [42, 100, 2024, 777, 999]
 
 def set_seed(seed):
